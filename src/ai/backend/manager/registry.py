@@ -989,6 +989,14 @@ class AgentRegistry:
             # Sanitize user input: does it have resource config?
             if "resources" in creation_config:
                 # Sanitize user input: does it have "known" resource slots only?
+                # NOTE: FastTrack abstracts resource type "cuda"
+                #       and the Backend.AI manager decides the actual type "cuda.device" or "cuda.shares".
+                if "cuda" in creation_config["resources"].keys():
+                    cuda_slot_value = creation_config["resources"].pop("cuda")
+                    for cuda_slot_key in ("cuda.shares", "cuda.device"):
+                        if cuda_slot_key in known_slot_types:
+                            creation_config["resources"][cuda_slot_key] = cuda_slot_value
+                            break
                 for slot_key, slot_value in creation_config["resources"].items():
                     if slot_key not in known_slot_types:
                         raise InvalidAPIParameters(f"Unknown requested resource slot: {slot_key}")
