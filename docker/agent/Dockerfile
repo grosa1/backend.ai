@@ -1,21 +1,38 @@
-FROM python:3.9
+# FROM python:3.9
 
-ARG branch=main
+# ARG branch=main
 
-RUN pip install -U -q pip setuptools
+# RUN pip install -U -q pip setuptools
+# RUN apt-get update && \
+#     apt-get install -y netcat libzmq3-dev libsnappy-dev
+# RUN mkdir /app
+# WORKDIR /app
+# RUN curl https://raw.githubusercontent.com/eficode/wait-for/master/wait-for --output /usr/local/bin/wait-for && \
+#     chmod +x /usr/local/bin/wait-for
+# RUN git clone -b $branch --single-branch https://github.com/lablup/backend.ai-agent --depth 50 /app && \
+#     pip install -U pip setuptools && \
+#     pip install \
+#         --no-cache-dir \
+#         -e "git+https://github.com/lablup/backend.ai-common@$branch#egg=backend.ai-common" \
+#         -e .
+
+# RUN mkdir -p /tmp/vfroot && mkdir -p /tmp/scratches
+
+# CMD ["wait-for", "backendai-etcd:2379", "--", "python", "-m", "ai.backend.agent.server"]
+
+FROM python:3.10
+
+RUN apt-get clean
 RUN apt-get update && \
-    apt-get install -y netcat libzmq3-dev libsnappy-dev
-RUN mkdir /app
-WORKDIR /app
-RUN curl https://raw.githubusercontent.com/eficode/wait-for/master/wait-for --output /usr/local/bin/wait-for && \
-    chmod +x /usr/local/bin/wait-for
-RUN git clone -b $branch --single-branch https://github.com/lablup/backend.ai-agent --depth 50 /app && \
-    pip install -U pip setuptools && \
-    pip install \
-        --no-cache-dir \
-        -e "git+https://github.com/lablup/backend.ai-common@$branch#egg=backend.ai-common" \
-        -e .
+    apt-get install -y netcat ncurses-term libzmq3-dev libsnappy-dev vim && \
+    rm -rf /var/lib/apt/lists/ && \
+    rm -rf /root/.cache && \
+    rm -rf /tmp/*
 
+RUN ln -sf /usr/share/terminfo/x/xterm-color /usr/share/terminfo/x/xterm-256color
+# RUN mkdir -p /agent
+WORKDIR /agent
+RUN pip install -U pip setuptools wheel && \
+    pip install -U backend.ai-agent
 RUN mkdir -p /tmp/vfroot && mkdir -p /tmp/scratches
 
-CMD ["wait-for", "backendai-etcd:2379", "--", "python", "-m", "ai.backend.agent.server"]
