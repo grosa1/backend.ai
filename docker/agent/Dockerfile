@@ -20,7 +20,7 @@
 
 # CMD ["wait-for", "backendai-etcd:2379", "--", "python", "-m", "ai.backend.agent.server"]
 
-FROM python:3.10
+FROM python:3.10.8
 
 RUN apt-get clean
 RUN apt-get update && \
