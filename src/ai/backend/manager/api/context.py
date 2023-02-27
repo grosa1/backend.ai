@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import attr
+import attrs
 
 if TYPE_CHECKING:
     from ai.backend.common.bgtask import BackgroundTaskManager
@@ -25,7 +25,7 @@ class BaseContext:
     pass
 
 
-@attr.s(slots=True, auto_attribs=True, init=False)
+@attrs.define(slots=True, auto_attribs=True, init=False)
 class RootContext(BaseContext):
     pidx: int
     db: ExtendedAsyncSAEngine
@@ -36,6 +36,7 @@ class RootContext(BaseContext):
     redis_stat: RedisConnectionInfo
     redis_image: RedisConnectionInfo
     redis_stream: RedisConnectionInfo
+    redis_lock: RedisConnectionInfo
     shared_config: SharedConfig
     local_config: LocalConfig
     cors_options: CORSOptions

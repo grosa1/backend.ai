@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import enum
 
-__all__ = (
-    'StringSetFlag',
-)
+__all__ = ("StringSetFlag",)
 
 
-class StringSetFlag(enum.Flag):
-
+class StringSetFlag(enum.StrEnum):
     def __eq__(self, other):
         return self.value == other
 

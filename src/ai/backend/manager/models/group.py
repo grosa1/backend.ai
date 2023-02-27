@@ -4,15 +4,25 @@ import asyncio
 import logging
 import re
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, TypedDict, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    Optional,
+    Sequence,
+    TypedDict,
+    Union,
+    overload,
+)
 
-import aiohttp
+import aiotools
 import graphene
 import sqlalchemy as sa
 from graphene.types.datetime import DateTime as GQLDateTime
-from sqlalchemy.dialects import postgresql as pgsql
 from sqlalchemy.engine.row import Row
 from sqlalchemy.ext.asyncio import AsyncConnection as SAConnection
+from sqlalchemy.orm import relationship
 
 from ai.backend.common import msgpack
 from ai.backend.common.logging import BraceStyleAdapter
@@ -22,11 +32,13 @@ from ..api.exceptions import VFolderOperationFailed
 from ..defs import RESERVED_DOTFILES
 from .base import (
     GUID,
+    Base,
     IDColumn,
     ResourceSlotColumn,
+    VFolderHostPermissionColumn,
     batch_multiresult,
     batch_result,
-    metadata,
+    mapper_registry,
     privileged_mutation,
     set_if_set,
     simple_db_mutate,
@@ -34,63 +46,121 @@ from .base import (
 )
 from .storage import StorageSessionManager
 from .user import ModifyUserInput, UserRole
-from .utils import execute_with_retry
+from .utils import ExtendedAsyncSAEngine, execute_with_retry
 
 if TYPE_CHECKING:
     from .gql import GraphQueryContext
     from .scaling_group import ScalingGroup
 
-log = BraceStyleAdapter(logging.getLogger(__file__))
+log = BraceStyleAdapter(logging.getLogger(__spec__.name))  # type: ignore[name-defined]
 
 
 __all__: Sequence[str] = (
-    'groups', 'association_groups_users',
-    'resolve_group_name_or_id',
-    'Group', 'GroupInput', 'ModifyGroupInput',
-    'CreateGroup', 'ModifyGroup', 'DeleteGroup',
-    'GroupDotfile', 'MAXIMUM_DOTFILE_SIZE',
-    'query_group_dotfiles',
-    'query_group_domain',
-    'verify_dotfile_name',
+    "groups",
+    "GroupRow",
+    "association_groups_users",
+    "AssocGroupUserRow",
+    "resolve_group_name_or_id",
+    "Group",
+    "GroupInput",
+    "ModifyGroupInput",
+    "CreateGroup",
+    "ModifyGroup",
+    "DeleteGroup",
+    "GroupDotfile",
+    "MAXIMUM_DOTFILE_SIZE",
+    "query_group_dotfiles",
+    "query_group_domain",
+    "verify_dotfile_name",
 )
 
 MAXIMUM_DOTFILE_SIZE = 64 * 1024  # 61 KiB
-_rx_slug = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$')
+_rx_slug = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
 
 association_groups_users = sa.Table(
-    'association_groups_users', metadata,
-    sa.Column('user_id', GUID,
-              sa.ForeignKey('users.uuid', onupdate='CASCADE', ondelete='CASCADE'),
-              nullable=False),
-    sa.Column('group_id', GUID,
-              sa.ForeignKey('groups.id', onupdate='CASCADE', ondelete='CASCADE'),
-              nullable=False),
-    sa.UniqueConstraint('user_id', 'group_id', name='uq_association_user_id_group_id'),
+    "association_groups_users",
+    mapper_registry.metadata,
+    sa.Column(
+        "user_id",
+        GUID,
+        sa.ForeignKey("users.uuid", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        primary_key=True,
+    ),
+    sa.Column(
+        "group_id",
+        GUID,
+        sa.ForeignKey("groups.id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        primary_key=True,
+    ),
 )
+
+
+class AssocGroupUserRow(Base):
+    __table__ = association_groups_users
+    user = relationship("UserRow", back_populates="groups")
+    group = relationship("GroupRow", back_populates="users")
 
 
 groups = sa.Table(
-    'groups', metadata,
-    IDColumn('id'),
-    sa.Column('name', sa.String(length=64), nullable=False),
-    sa.Column('description', sa.String(length=512)),
-    sa.Column('is_active', sa.Boolean, default=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-    sa.Column('modified_at', sa.DateTime(timezone=True),
-              server_default=sa.func.now(), onupdate=sa.func.current_timestamp()),
+    "groups",
+    mapper_registry.metadata,
+    IDColumn("id"),
+    sa.Column("name", sa.String(length=64), nullable=False),
+    sa.Column("description", sa.String(length=512)),
+    sa.Column("is_active", sa.Boolean, default=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+    sa.Column(
+        "modified_at",
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        onupdate=sa.func.current_timestamp(),
+    ),
     #: Field for synchronization with external services.
-    sa.Column('integration_id', sa.String(length=512)),
-
-    sa.Column('domain_name', sa.String(length=64),
-              sa.ForeignKey('domains.name', onupdate='CASCADE', ondelete='CASCADE'),
-              nullable=False, index=True),
+    sa.Column("integration_id", sa.String(length=512)),
+    sa.Column(
+        "domain_name",
+        sa.String(length=64),
+        sa.ForeignKey("domains.name", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
     # TODO: separate resource-related fields with new domain resource policy table when needed.
-    sa.Column('total_resource_slots', ResourceSlotColumn(), default='{}'),
-    sa.Column('allowed_vfolder_hosts', pgsql.ARRAY(sa.String), nullable=False, default='{}'),
-    sa.UniqueConstraint('name', 'domain_name', name='uq_groups_name_domain_name'),
+    sa.Column("total_resource_slots", ResourceSlotColumn(), default="{}"),
+    sa.Column(
+        "allowed_vfolder_hosts",
+        VFolderHostPermissionColumn(),
+        nullable=False,
+        default={},
+    ),
+    sa.UniqueConstraint("name", "domain_name", name="uq_groups_name_domain_name"),
     # dotfiles column, \x90 means empty list in msgpack
-    sa.Column('dotfiles', sa.LargeBinary(length=MAXIMUM_DOTFILE_SIZE), nullable=False, default=b'\x90'),
+    sa.Column(
+        "dotfiles", sa.LargeBinary(length=MAXIMUM_DOTFILE_SIZE), nullable=False, default=b"\x90"
+    ),
 )
+
+
+class GroupRow(Base):
+    __table__ = groups
+    sessions = relationship("SessionRow", back_populates="group")
+    domain = relationship("DomainRow", back_populates="groups")
+    scaling_groups = relationship(
+        "ScalingGroupRow", secondary="sgroups_for_groups", back_populates="groups"
+    )
+    users = relationship("AssocGroupUserRow", back_populates="group")
+
+
+def _build_group_query(cond: sa.sql.BinaryExpression, domain_name: str) -> sa.sql.Select:
+    query = (
+        sa.select([groups.c.id])
+        .select_from(groups)
+        .where(
+            cond & (groups.c.domain_name == domain_name),
+        )
+    )
+    return query
 
 
 async def resolve_group_name_or_id(
@@ -98,28 +168,55 @@ async def resolve_group_name_or_id(
     domain_name: str,
     value: Union[str, uuid.UUID],
 ) -> Optional[uuid.UUID]:
-    if isinstance(value, str):
-        query = (
-            sa.select([groups.c.id])
-            .select_from(groups)
-            .where(
-                (groups.c.name == value) &
-                (groups.c.domain_name == domain_name),
-            )
-        )
-        return await db_conn.scalar(query)
-    elif isinstance(value, uuid.UUID):
-        query = (
-            sa.select([groups.c.id])
-            .select_from(groups)
-            .where(
-                (groups.c.id == value) &
-                (groups.c.domain_name == domain_name),
-            )
-        )
-        return await db_conn.scalar(query)
-    else:
-        raise TypeError('unexpected type for group_name_or_id')
+    match value:
+        case uuid.UUID():
+            cond = groups.c.id == value
+        case str():
+            cond = groups.c.name == value
+        case _:
+            raise TypeError("unexpected type for group_name_or_id")
+    query = _build_group_query(cond, domain_name)
+    return await db_conn.scalar(query)
+
+
+@overload
+async def resolve_groups(
+    db_conn: SAConnection,
+    domain_name: str,
+    values: Iterable[uuid.UUID],
+) -> Iterable[uuid.UUID]:
+    ...
+
+
+@overload
+async def resolve_groups(
+    db_conn: SAConnection,
+    domain_name: str,
+    values: Iterable[str],
+) -> Iterable[uuid.UUID]:
+    ...
+
+
+async def resolve_groups(
+    db_conn: SAConnection,
+    domain_name: str,
+    values: Iterable[uuid.UUID] | Iterable[str],
+) -> Iterable[uuid.UUID]:
+    listed_val = [*values]
+    match listed_val:
+        case [uuid.UUID(), *_]:
+            query = _build_group_query((groups.c.id.in_(listed_val)), domain_name)
+        case [str(), *_]:
+            query = _build_group_query((groups.c.name.in_(listed_val)), domain_name)
+        case []:
+            return []
+        case _:
+            raise TypeError("unexpected type for group_name_or_id")
+
+    rows = (await db_conn.execute(query)).fetchall()
+    return_val = [row["id"] for row in rows]
+
+    return return_val
 
 
 class Group(graphene.ObjectType):
@@ -131,7 +228,7 @@ class Group(graphene.ObjectType):
     modified_at = GQLDateTime()
     domain_name = graphene.String()
     total_resource_slots = graphene.JSONString()
-    allowed_vfolder_hosts = graphene.List(lambda: graphene.String)
+    allowed_vfolder_hosts = graphene.JSONString()
     integration_id = graphene.String()
 
     scaling_groups = graphene.List(lambda: graphene.String)
@@ -141,22 +238,23 @@ class Group(graphene.ObjectType):
         if row is None:
             return None
         return cls(
-            id=row['id'],
-            name=row['name'],
-            description=row['description'],
-            is_active=row['is_active'],
-            created_at=row['created_at'],
-            modified_at=row['modified_at'],
-            domain_name=row['domain_name'],
-            total_resource_slots=row['total_resource_slots'].to_json(),
-            allowed_vfolder_hosts=row['allowed_vfolder_hosts'],
-            integration_id=row['integration_id'],
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            modified_at=row["modified_at"],
+            domain_name=row["domain_name"],
+            total_resource_slots=row["total_resource_slots"].to_json(),
+            allowed_vfolder_hosts=row["allowed_vfolder_hosts"].to_json(),
+            integration_id=row["integration_id"],
         )
 
     async def resolve_scaling_groups(self, info: graphene.ResolveInfo) -> Sequence[ScalingGroup]:
         graph_ctx: GraphQueryContext = info.context
         loader = graph_ctx.dataloader_manager.get_loader(
-            graph_ctx, "ScalingGroup.by_group",
+            graph_ctx,
+            "ScalingGroup.by_group",
         )
         sgroups = await loader.load(self.id)
         return [sg.name for sg in sgroups]
@@ -169,17 +267,15 @@ class Group(graphene.ObjectType):
         domain_name: str = None,
         is_active: bool = None,
     ) -> Sequence[Group]:
-        query = (
-            sa.select([groups])
-            .select_from(groups)
-        )
+        query = sa.select([groups]).select_from(groups)
         if domain_name is not None:
             query = query.where(groups.c.domain_name == domain_name)
         if is_active is not None:
             query = query.where(groups.c.is_active == is_active)
         async with graph_ctx.db.begin_readonly() as conn:
             return [
-                obj async for row in (await conn.stream(query))
+                obj
+                async for row in (await conn.stream(query))
                 if (obj := cls.from_row(graph_ctx, row)) is not None
             ]
 
@@ -191,17 +287,17 @@ class Group(graphene.ObjectType):
         *,
         domain_name: str = None,
     ) -> Sequence[Group | None]:
-        query = (
-            sa.select([groups])
-            .select_from(groups)
-            .where(groups.c.id.in_(group_ids))
-        )
+        query = sa.select([groups]).select_from(groups).where(groups.c.id.in_(group_ids))
         if domain_name is not None:
             query = query.where(groups.c.domain_name == domain_name)
         async with graph_ctx.db.begin_readonly() as conn:
             return await batch_result(
-                graph_ctx, conn, query, cls,
-                group_ids, lambda row: row['id'],
+                graph_ctx,
+                conn,
+                query,
+                cls,
+                group_ids,
+                lambda row: row["id"],
             )
 
     @classmethod
@@ -212,17 +308,17 @@ class Group(graphene.ObjectType):
         *,
         domain_name: str = None,
     ) -> Sequence[Sequence[Group | None]]:
-        query = (
-            sa.select([groups])
-            .select_from(groups)
-            .where(groups.c.name.in_(group_names))
-        )
+        query = sa.select([groups]).select_from(groups).where(groups.c.name.in_(group_names))
         if domain_name is not None:
             query = query.where(groups.c.domain_name == domain_name)
         async with graph_ctx.db.begin_readonly() as conn:
             return await batch_multiresult(
-                graph_ctx, conn, query, cls,
-                group_names, lambda row: row['name'],
+                graph_ctx,
+                conn,
+                query,
+                cls,
+                group_names,
+                lambda row: row["name"],
             )
 
     @classmethod
@@ -232,7 +328,8 @@ class Group(graphene.ObjectType):
         user_ids: Sequence[uuid.UUID],
     ) -> Sequence[Sequence[Group | None]]:
         j = sa.join(
-            groups, association_groups_users,
+            groups,
+            association_groups_users,
             groups.c.id == association_groups_users.c.group_id,
         )
         query = (
@@ -242,8 +339,12 @@ class Group(graphene.ObjectType):
         )
         async with graph_ctx.db.begin_readonly() as conn:
             return await batch_multiresult(
-                graph_ctx, conn, query, cls,
-                user_ids, lambda row: row['user_id'],
+                graph_ctx,
+                conn,
+                query,
+                cls,
+                user_ids,
+                lambda row: row["user_id"],
             )
 
     @classmethod
@@ -253,17 +354,17 @@ class Group(graphene.ObjectType):
         user_id: uuid.UUID,
     ) -> Sequence[Group]:
         j = sa.join(
-            groups, association_groups_users,
+            groups,
+            association_groups_users,
             groups.c.id == association_groups_users.c.group_id,
         )
         query = (
-            sa.select([groups])
-            .select_from(j)
-            .where(association_groups_users.c.user_id == user_id)
+            sa.select([groups]).select_from(j).where(association_groups_users.c.user_id == user_id)
         )
         async with graph_ctx.db.begin_readonly() as conn:
             return [
-                obj async for row in (await conn.stream(query))
+                obj
+                async for row in (await conn.stream(query))
                 if (obj := cls.from_row(graph_ctx, row)) is not None
             ]
 
@@ -273,7 +374,7 @@ class GroupInput(graphene.InputObjectType):
     is_active = graphene.Boolean(required=False, default=True)
     domain_name = graphene.String(required=True)
     total_resource_slots = graphene.JSONString(required=False)
-    allowed_vfolder_hosts = graphene.List(lambda: graphene.String, required=False)
+    allowed_vfolder_hosts = graphene.JSONString(required=False)
     integration_id = graphene.String(required=False)
 
 
@@ -285,7 +386,7 @@ class ModifyGroupInput(graphene.InputObjectType):
     total_resource_slots = graphene.JSONString(required=False)
     user_update_mode = graphene.String(required=False)
     user_uuids = graphene.List(lambda: graphene.String, required=False)
-    allowed_vfolder_hosts = graphene.List(lambda: graphene.String, required=False)
+    allowed_vfolder_hosts = graphene.JSONString(required=False)
     integration_id = graphene.String(required=False)
 
 
@@ -314,21 +415,18 @@ class CreateGroup(graphene.Mutation):
         props: GroupInput,
     ) -> CreateGroup:
         if _rx_slug.search(name) is None:
-            raise ValueError('invalid name format. slug format required.')
+            raise ValueError("invalid name format. slug format required.")
         graph_ctx: GraphQueryContext = info.context
         data = {
-            'name': name,
-            'description': props.description,
-            'is_active': props.is_active,
-            'domain_name': props.domain_name,
-            'total_resource_slots': ResourceSlot.from_user_input(
-                props.total_resource_slots, None),
-            'allowed_vfolder_hosts': props.allowed_vfolder_hosts,
-            'integration_id': props.integration_id,
+            "name": name,
+            "description": props.description,
+            "is_active": props.is_active,
+            "domain_name": props.domain_name,
+            "total_resource_slots": ResourceSlot.from_user_input(props.total_resource_slots, None),
+            "allowed_vfolder_hosts": props.allowed_vfolder_hosts,
+            "integration_id": props.integration_id,
         }
-        insert_query = (
-            sa.insert(groups).values(data)
-        )
+        insert_query = sa.insert(groups).values(data)
         return await simple_db_mutate_returning_item(cls, graph_ctx, insert_query, item_cls=Group)
 
 
@@ -358,69 +456,70 @@ class ModifyGroup(graphene.Mutation):
     ) -> ModifyGroup:
         graph_ctx: GraphQueryContext = info.context
         data: Dict[str, Any] = {}
-        set_if_set(props, data, 'name')
-        set_if_set(props, data, 'description')
-        set_if_set(props, data, 'is_active')
-        set_if_set(props, data, 'domain_name')
-        set_if_set(props, data, 'total_resource_slots',
-                   clean_func=lambda v: ResourceSlot.from_user_input(v, None))
-        set_if_set(props, data, 'allowed_vfolder_hosts')
-        set_if_set(props, data, 'integration_id')
+        set_if_set(props, data, "name")
+        set_if_set(props, data, "description")
+        set_if_set(props, data, "is_active")
+        set_if_set(props, data, "domain_name")
+        set_if_set(
+            props,
+            data,
+            "total_resource_slots",
+            clean_func=lambda v: ResourceSlot.from_user_input(v, None),
+        )
+        set_if_set(props, data, "allowed_vfolder_hosts")
+        set_if_set(props, data, "integration_id")
 
-        if 'name' in data and _rx_slug.search(data['name']) is None:
-            raise ValueError('invalid name format. slug format required.')
-        if props.user_update_mode not in (None, 'add', 'remove'):
-            raise ValueError('invalid user_update_mode')
+        if "name" in data and _rx_slug.search(data["name"]) is None:
+            raise ValueError("invalid name format. slug format required.")
+        if props.user_update_mode not in (None, "add", "remove"):
+            raise ValueError("invalid user_update_mode")
         if not props.user_uuids:
             props.user_update_mode = None
         if not data and props.user_update_mode is None:
-            return cls(ok=False, msg='nothing to update', group=None)
+            return cls(ok=False, msg="nothing to update", group=None)
 
         async def _do_mutate() -> ModifyGroup:
             async with graph_ctx.db.begin() as conn:
                 # TODO: refactor user addition/removal in groups as separate mutations
                 #       (to apply since 21.09)
-                if props.user_update_mode == 'add':
-                    values = [{'user_id': uuid, 'group_id': gid} for uuid in props.user_uuids]
+                if props.user_update_mode == "add":
+                    values = [{"user_id": uuid, "group_id": gid} for uuid in props.user_uuids]
                     await conn.execute(
                         sa.insert(association_groups_users).values(values),
                     )
-                elif props.user_update_mode == 'remove':
+                elif props.user_update_mode == "remove":
                     await conn.execute(
-                        sa.delete(association_groups_users)
-                        .where(
-                            (association_groups_users.c.user_id.in_(props.user_uuids)) &
-                            (association_groups_users.c.group_id == gid),
+                        sa.delete(association_groups_users).where(
+                            (association_groups_users.c.user_id.in_(props.user_uuids))
+                            & (association_groups_users.c.group_id == gid),
                         ),
                     )
                 if data:
                     result = await conn.execute(
-                        sa.update(groups)
-                        .values(data)
-                        .where(groups.c.id == gid)
-                        .returning(groups),
+                        sa.update(groups).values(data).where(groups.c.id == gid).returning(groups),
                     )
                     if result.rowcount > 0:
                         o = Group.from_row(graph_ctx, result.first())
-                        return cls(ok=True, msg='success', group=o)
-                    return cls(ok=False, msg='no such group', group=None)
+                        return cls(ok=True, msg="success", group=o)
+                    return cls(ok=False, msg="no such group", group=None)
                 else:  # updated association_groups_users table
-                    return cls(ok=True, msg='success', group=None)
+                    return cls(ok=True, msg="success", group=None)
 
         try:
             return await execute_with_retry(_do_mutate)
         except sa.exc.IntegrityError as e:
-            return cls(ok=False, msg=f'integrity error: {e}', group=None)
+            return cls(ok=False, msg=f"integrity error: {e}", group=None)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             raise
         except Exception as e:
-            return cls(ok=False, msg=f'unexpected error: {e}', group=None)
+            return cls(ok=False, msg=f"unexpected error: {e}", group=None)
 
 
 class DeleteGroup(graphene.Mutation):
     """
     Instead of deleting the group, just mark it as inactive.
     """
+
     allowed_roles = (UserRole.ADMIN, UserRole.SUPERADMIN)
 
     class Arguments:
@@ -437,10 +536,12 @@ class DeleteGroup(graphene.Mutation):
     async def mutate(cls, root, info: graphene.ResolveInfo, gid: uuid.UUID) -> DeleteGroup:
         ctx: GraphQueryContext = info.context
         update_query = (
-            sa.update(groups).values(
+            sa.update(groups)
+            .values(
                 is_active=False,
                 integration_id=None,
-            ).where(groups.c.id == gid)
+            )
+            .where(groups.c.id == gid)
         )
         return await simple_db_mutate(cls, ctx, update_query)
 
@@ -453,6 +554,7 @@ class PurgeGroup(graphene.Mutation):
     as well as the kernels run from the group.
     There is no migration of the ownership for group folders.
     """
+
     allowed_roles = (UserRole.ADMIN, UserRole.SUPERADMIN)
 
     class Arguments:
@@ -478,10 +580,9 @@ class PurgeGroup(graphene.Mutation):
                 )
             if await cls.group_has_active_kernels(conn, gid):
                 raise RuntimeError(
-                    "Group has some active session. "
-                    "Terminate them first to proceed removal.",
+                    "Group has some active session. " "Terminate them first to proceed removal.",
                 )
-            await cls.delete_vfolders(conn, gid, graph_ctx.storage_manager)
+            await cls.delete_vfolders(graph_ctx.db, gid, graph_ctx.storage_manager)
             await cls.delete_kernels(conn, gid)
 
         delete_query = sa.delete(groups).where(groups.c.id == gid)
@@ -490,7 +591,7 @@ class PurgeGroup(graphene.Mutation):
     @classmethod
     async def delete_vfolders(
         cls,
-        db_conn: SAConnection,
+        engine: ExtendedAsyncSAEngine,
         group_id: uuid.UUID,
         storage_manager: StorageSessionManager,
     ) -> int:
@@ -502,33 +603,33 @@ class PurgeGroup(graphene.Mutation):
 
         :return: number of deleted rows
         """
-        from . import vfolders
+        from . import VFolderDeletionInfo, initiate_vfolder_removal, vfolders
+
         query = (
             sa.select([vfolders.c.id, vfolders.c.host])
             .select_from(vfolders)
             .where(vfolders.c.group == group_id)
         )
-        result = await db_conn.execute(query)
-        target_vfs = result.fetchall()
-        delete_query = (sa.delete(vfolders).where(vfolders.c.group == group_id))
-        result = await db_conn.execute(delete_query)
-        for row in target_vfs:
-            try:
-                async with storage_manager.request(
-                    row['host'], 'POST', 'folder/delete',
-                    json={
-                        'volume': storage_manager.split_host(row['host'])[1],
-                        'vfid': str(row['id']),
-                    },
-                    raise_for_status=True,
-                ):
-                    pass
-            except aiohttp.ClientResponseError:
-                log.error('error on deleting vfolder filesystem directory: {0}', row['id'])
-                raise VFolderOperationFailed
-        if result.rowcount > 0:
-            log.info('deleted {0} group\'s virtual folders ({1})', result.rowcount, group_id)
-        return result.rowcount
+        async with engine.begin_session() as db_conn:
+            result = await db_conn.execute(query)
+            target_vfs = result.fetchall()
+            delete_query = sa.delete(vfolders).where(vfolders.c.group == group_id)
+            result = await db_conn.execute(delete_query)
+
+        storage_ptask_group = aiotools.PersistentTaskGroup()
+        try:
+            deleted_count = await initiate_vfolder_removal(
+                engine,
+                [VFolderDeletionInfo(vf["id"], vf["host"]) for vf in target_vfs],
+                storage_manager,
+                storage_ptask_group,
+            )
+        except VFolderOperationFailed as e:
+            log.error("error on deleting vfolder filesystem directory: {0}", e.extra_msg)
+            raise
+        if deleted_count > 0:
+            log.info("deleted {0} group's virtual folders ({1})", deleted_count, group_id)
+        return deleted_count
 
     @classmethod
     async def delete_kernels(
@@ -545,13 +646,11 @@ class PurgeGroup(graphene.Mutation):
         :return: number of deleted rows
         """
         from . import kernels
-        query = (
-            sa.delete(kernels)
-            .where(kernels.c.group_id == group_id)
-        )
+
+        query = sa.delete(kernels).where(kernels.c.group_id == group_id)
         result = await db_conn.execute(query)
         if result.rowcount > 0:
-            log.info('deleted {0} group\'s kernels ({1})', result.rowcount, group_id)
+            log.info("deleted {0} group's kernels ({1})", result.rowcount, group_id)
         return result.rowcount
 
     @classmethod
@@ -569,24 +668,21 @@ class PurgeGroup(graphene.Mutation):
         :return: True if a virtual folder is mounted to active kernels.
         """
         from . import AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES, kernels, vfolders
-        query = (
-            sa.select([vfolders.c.id])
-            .select_from(vfolders)
-            .where(vfolders.c.group == group_id)
-        )
+
+        query = sa.select([vfolders.c.id]).select_from(vfolders).where(vfolders.c.group == group_id)
         result = await db_conn.execute(query)
         rows = result.fetchall()
-        group_vfolder_ids = [row['id'] for row in rows]
+        group_vfolder_ids = [row["id"] for row in rows]
         query = (
             sa.select([kernels.c.mounts])
             .select_from(kernels)
             .where(
-                (kernels.c.group_id == group_id) &
-                (kernels.c.status.in_(AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES)),
+                (kernels.c.group_id == group_id)
+                & (kernels.c.status.in_(AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES)),
             )
         )
         async for row in (await db_conn.stream(query)):
-            for _mount in row['mounts']:
+            for _mount in row["mounts"]:
                 try:
                     vfolder_id = uuid.UUID(_mount[2])
                     if vfolder_id in group_vfolder_ids:
@@ -610,11 +706,14 @@ class PurgeGroup(graphene.Mutation):
         :return: True if the group has some active kernels.
         """
         from . import AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES, kernels
+
         query = (
             sa.select([sa.func.count()])
             .select_from(kernels)
-            .where((kernels.c.group_id == group_id) &
-                   (kernels.c.status.in_(AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES)))
+            .where(
+                (kernels.c.group_id == group_id)
+                & (kernels.c.status.in_(AGENT_RESOURCE_OCCUPYING_KERNEL_STATUSES))
+            )
         )
         active_kernel_count = await db_conn.scalar(query)
         return True if active_kernel_count > 0 else False
@@ -630,11 +729,7 @@ async def query_group_dotfiles(
     db_conn: SAConnection,
     group_id: Union[GUID, uuid.UUID],
 ) -> tuple[list[GroupDotfile], int]:
-    query = (
-        sa.select([groups.c.dotfiles])
-        .select_from(groups)
-        .where(groups.c.id == group_id)
-    )
+    query = sa.select([groups.c.dotfiles]).select_from(groups).where(groups.c.id == group_id)
     packed_dotfile = await db_conn.scalar(query)
     if packed_dotfile is None:
         return [], MAXIMUM_DOTFILE_SIZE
@@ -646,11 +741,7 @@ async def query_group_domain(
     db_conn: SAConnection,
     group_id: Union[GUID, uuid.UUID],
 ) -> str:
-    query = (
-        sa.select([groups.c.domain_name])
-        .select_from(groups)
-        .where(groups.c.id == group_id)
-    )
+    query = sa.select([groups.c.domain_name]).select_from(groups).where(groups.c.id == group_id)
     domain = await db_conn.scalar(query)
     return domain
 

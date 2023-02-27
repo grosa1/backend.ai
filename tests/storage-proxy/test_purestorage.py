@@ -9,6 +9,9 @@ import pytest
 from ai.backend.storage.purestorage import FlashBladeVolume
 from ai.backend.storage.types import DirEntryType
 
+# module-level marker
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def fbroot():
@@ -74,9 +77,7 @@ async def test_fb_scandir(fb_volume, empty_vfolder):
     (vfpath / "inner" / "world.txt").write_bytes(b"def")
     (vfpath / "test2.txt").symlink_to((vfpath / "inner" / "hello.txt"))
     (vfpath / "inner2").symlink_to((vfpath / "inner"))
-    entries = [
-        item async for item in fb_volume.scandir(empty_vfolder, PurePosixPath("."))
-    ]
+    entries = [item async for item in fb_volume.scandir(empty_vfolder, PurePosixPath("."))]
     assert len(entries) == 4
     entries.sort(key=lambda entry: entry.name)
     assert entries[0].name == "inner"

@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, List, Mapping, Optional, Sequence
 
 from tabulate import tabulate
 
-from ai.backend.client.cli.pagination import (
-    echo_via_pager,
-    get_preferred_page_size,
-    tabulate_items,
-)
+from ai.backend.client.cli.pagination import echo_via_pager, get_preferred_page_size, tabulate_items
 from ai.backend.client.cli.pretty import print_error, print_fail
 
 from .types import BaseOutputHandler, FieldSpec, PaginatedResult
+
+_Item = Mapping[str, Any]
 
 
 class NoItems(Exception):
@@ -20,50 +18,55 @@ class NoItems(Exception):
 
 
 class ConsoleOutputHandler(BaseOutputHandler):
-
     def print_item(
         self,
-        item: Mapping[str, Any] | None,
+        item: Optional[_Item],
         fields: Sequence[FieldSpec],
     ) -> None:
         if item is None:
             print_fail("No matching entry found.")
             return
         field_map = {f.field_name: f for f in fields}
-        print(tabulate(
-            [
-                (
-                    field_map[k].humanized_name,
-                    field_map[k].formatter.format_console(v, field_map[k]),
-                )
-                for k, v in item.items()
-            ],
-            headers=('Field', 'Value'),
-        ))
-
-    def print_items(
-        self,
-        items: Sequence[Mapping[str, Any]],
-        fields: Sequence[FieldSpec],
-    ) -> None:
-        field_map = {f.field_name: f for f in fields}
-        for idx, item in enumerate(items):
-            if idx > 0:
-                print("-" * 20)
-            print(tabulate(
+        print(
+            tabulate(
                 [
                     (
                         field_map[k].humanized_name,
                         field_map[k].formatter.format_console(v, field_map[k]),
                     )
                     for k, v in item.items()
+                    if k in field_map
                 ],
-                headers=('Field', 'Value'),
-            ))
+                headers=("Field", "Value"),
+            )
+        )
+
+    def print_items(
+        self,
+        items: Sequence[_Item],
+        fields: Sequence[FieldSpec],
+    ) -> None:
+        field_map = {f.field_name: f for f in fields}
+        for idx, item in enumerate(items):
+            if idx > 0:
+                print("-" * 20)
+            print(
+                tabulate(
+                    [
+                        (
+                            field_map[k].humanized_name,
+                            field_map[k].formatter.format_console(v, field_map[k]),
+                        )
+                        for k, v in item.items()
+                        if k in field_map
+                    ],
+                    headers=("Field", "Value"),
+                )
+            )
 
     def print_list(
         self,
-        items: Sequence[Mapping[str, Any]],
+        items: Sequence[_Item],
         fields: Sequence[FieldSpec],
         *,
         is_scalar: bool = False,
@@ -81,10 +84,10 @@ class ConsoleOutputHandler(BaseOutputHandler):
                     if is_scalar:
                         yield from map(
                             lambda v: {fields[0].field_name: v},
-                            items[current_offset:current_offset + page_size],
+                            items[current_offset : current_offset + page_size],
                         )
                     else:
-                        yield from items[current_offset:current_offset + page_size]
+                        yield from items[current_offset : current_offset + page_size]
                     current_offset += page_size
                     if current_offset >= len(items):
                         break
@@ -116,82 +119,88 @@ class ConsoleOutputHandler(BaseOutputHandler):
         self,
         fetch_func: Callable[[int, int], PaginatedResult],
         initial_page_offset: int,
-        page_size: int = None,
+        page_size: Optional[int] = None,
     ) -> None:
+        fields: List[FieldSpec] = []
+
+        def infinite_fetch(_page_size: int) -> Iterator[_Item]:
+            nonlocal fields
+            current_offset = initial_page_offset
+            while True:
+                result = fetch_func(current_offset, _page_size)
+                if result.total_count == 0:
+                    raise NoItems
+                current_offset += len(result.items)
+                if not fields:
+                    fields.extend(result.fields)
+                yield from result.items
+                if current_offset >= result.total_count:
+                    break
+
         if sys.stdout.isatty() and page_size is None:
-            page_size = get_preferred_page_size()
-            fields: Sequence[FieldSpec] = []
-
-            def infinite_fetch():
-                nonlocal fields
-                current_offset = initial_page_offset
-                while True:
-                    result = fetch_func(current_offset, page_size)
-                    if result.total_count == 0:
-                        raise NoItems
-                    current_offset += len(result.items)
-                    if not fields:
-                        fields.extend(result.fields)
-                    yield from result.items
-                    if current_offset >= result.total_count:
-                        break
-
+            preferred_page_size = get_preferred_page_size()
             try:
                 echo_via_pager(
                     tabulate_items(
-                        infinite_fetch(),
+                        infinite_fetch(preferred_page_size),
                         fields,
                     ),
                 )
             except NoItems:
                 print("No matching items.")
         else:
-            page_size = page_size or 20
-            result = fetch_func(initial_page_offset, page_size)
+            if page_size is None:
+                page_size = 20
             for line in tabulate_items(
-                result.items,  # type: ignore
-                result.fields,
+                infinite_fetch(page_size),
+                fields,
             ):
                 print(line, end="")
 
     def print_mutation_result(
         self,
-        item: Mapping[str, Any],
+        item: _Item,
         item_name: Optional[str] = None,
         action_name: Optional[str] = None,
         extra_info: Mapping = {},
     ) -> None:
         t = [
-            ['ok', item['ok']],
-            ['msg', item['msg']],
+            ["ok", item["ok"]],
+            ["msg", item["msg"]],
             *[(k, v) for k, v in extra_info.items()],
         ]
         if action_name is not None:
-            t += [['Action', action_name]]
+            t += [["Action", action_name]]
         if item_name is not None:
             t += [(k, v) for k, v in item[item_name].items()]
-        print(tabulate(
-            t, headers=('Field', 'Value'),
-        ))
+        print(
+            tabulate(
+                t,
+                headers=("Field", "Value"),
+            )
+        )
 
     def print_mutation_error(
         self,
         error: Optional[Exception] = None,
-        msg: str = 'Failed',
+        msg: str = "Failed",
         item_name: Optional[str] = None,
         action_name: Optional[str] = None,
         extra_info: Mapping = {},
     ) -> None:
         t = [
-            ['Message', msg],
+            ["Message", msg],
         ]
         if item_name is not None:
-            t += [['Item', item_name]]
+            t += [["Item", item_name]]
         if action_name is not None:
-            t += [['Action', action_name]]
-        print(tabulate(
-            t, headers=('Field', 'Value'),
-        ))
+            t += [["Action", action_name]]
+        print(
+            tabulate(
+                t,
+                headers=("Field", "Value"),
+            )
+        )
         if error is not None:
             print_error(error)
 

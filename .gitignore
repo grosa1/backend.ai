@@ -80,7 +80,11 @@ ENV/
 .idea
 *.swp
 *.swo
-.vscode
+.vscode/
+/.vimrc
+/.nvimrc
+/.exrc
+.vim/
 
 # Pants
 /.pants.d/
@@ -89,7 +93,6 @@ ENV/
 /.pants.rc
 /pants-local
 /tools/pants-src
-/tools/pants-local
 
 # Local configurations
 /manager.toml
@@ -98,9 +101,11 @@ ENV/
 /webserver.conf
 /cuda-mock.toml
 /.pants.env
+/.pants.bootstrap
 /docker-compose.halfstack.current.yml
 /alembic.ini
 /dev.etcd.volumes.json
+/dev.etcd.installed.json
 /env-*.sh
 
 # Local temp
@@ -111,5 +116,11 @@ ENV/
 /*.pid
 /scratches/
 
+# Additional clones for editable components
+/src/ai/backend/webui/
+
 # Release artifacts
 /CHANGELOG_RELEASE.md
+
+# macOS specific
+.DS_Store

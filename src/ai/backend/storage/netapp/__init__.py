@@ -262,9 +262,7 @@ class NetAppVolume(BaseVolume):
         return resp
 
     async def get_qtree_id_by_name(self, qtree_name):
-        qtree_name = (
-            qtree_name if qtree_name else await self.get_default_qtree_by_volume_id()
-        )
+        qtree_name = qtree_name if qtree_name else await self.get_default_qtree_by_volume_id()
         resp = await self.netapp_client.get_qtree_id_by_name(qtree_name)
 
         if "error" in resp:
@@ -392,3 +390,7 @@ class NetAppVolume(BaseVolume):
             )
 
         return VFolderUsage(file_count=total_count, used_bytes=total_size)
+
+    async def get_used_bytes(self, vfid: UUID) -> BinarySize:
+        usage = await self.get_usage(vfid)
+        return BinarySize(usage.used_bytes)

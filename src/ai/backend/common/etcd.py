@@ -1,11 +1,11 @@
-'''
+"""
 An asynchronous client wrapper for etcd v3 API.
 
 It uses the etcd3 library using a thread pool executor.
 We plan to migrate to aioetcd3 library but it requires more work to get maturity.
 Fortunately, etcd3's watchers are not blocking because they are implemented
 using callbacks in separate threads.
-'''
+"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from typing import (
 from urllib.parse import quote as _quote
 from urllib.parse import unquote
 
-import grpc
+import grpc  # pants: no-infer-dep (etcetra)
 import trafaret as t
 from etcetra import EtcdCommunicator, WatchEvent
 from etcetra.client import EtcdClient, EtcdTransactionAction
@@ -44,13 +44,14 @@ from .logging_utils import BraceStyleAdapter
 from .types import HostPortPair, QueueSentinel
 
 __all__ = (
-    'quote', 'unquote',
-    'AsyncEtcd',
+    "quote",
+    "unquote",
+    "AsyncEtcd",
 )
 
-Event = namedtuple('Event', 'key event value')
+Event = namedtuple("Event", "key event value")
 
-log = BraceStyleAdapter(logging.getLogger(__name__))
+log = BraceStyleAdapter(logging.getLogger(__spec__.name))  # type: ignore[name-defined]
 
 
 class ConfigScopes(enum.Enum):
@@ -60,10 +61,10 @@ class ConfigScopes(enum.Enum):
     NODE = 3
 
 
-quote = functools.partial(_quote, safe='')
+quote = functools.partial(_quote, safe="")
 
 
-def make_dict_from_pairs(key_prefix, pairs, path_sep='/'):
+def make_dict_from_pairs(key_prefix, pairs, path_sep="/"):
     result = {}
     len_prefix = len(key_prefix)
     if isinstance(pairs, dict):
@@ -76,7 +77,7 @@ def make_dict_from_pairs(key_prefix, pairs, path_sep='/'):
         subkey = k[len_prefix:]
         if subkey.startswith(path_sep):
             subkey = subkey[1:]
-        path_components = subkey.split('/')
+        path_components = subkey.split("/")
         parent = result
         for p in path_components[:-1]:
             p = unquote(p)
@@ -84,18 +85,20 @@ def make_dict_from_pairs(key_prefix, pairs, path_sep='/'):
                 parent[p] = {}
             if p in parent and not isinstance(parent[p], dict):
                 root = parent[p]
-                parent[p] = {'': root}
+                parent[p] = {"": root}
             parent = parent[p]
         parent[unquote(path_components[-1])] = v
     return result
 
 
 def _slash(v: str):
-    return v.rstrip('/') + '/' if len(v) > 0 else ''
+    return v.rstrip("/") + "/" if len(v) > 0 else ""
 
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+GetPrefixValue = Mapping[str, Union["GetPrefixValue", Optional[str]]]
 
 
 class AsyncEtcd:
@@ -111,16 +114,18 @@ class AsyncEtcd:
         scope_prefix_map: Mapping[ConfigScopes, str],
         *,
         credentials: dict[str, str] = None,
-        encoding: str = 'utf-8',
+        encoding: str = "utf-8",
         watch_reconnect_intvl: float = 0.5,
     ) -> None:
-        self.scope_prefix_map = t.Dict({
-            t.Key(ConfigScopes.GLOBAL): t.String(allow_blank=True),
-            t.Key(ConfigScopes.SGROUP, optional=True): t.String,
-            t.Key(ConfigScopes.NODE, optional=True): t.String,
-        }).check(scope_prefix_map)
+        self.scope_prefix_map = t.Dict(
+            {
+                t.Key(ConfigScopes.GLOBAL): t.String(allow_blank=True),
+                t.Key(ConfigScopes.SGROUP, optional=True): t.String,
+                t.Key(ConfigScopes.NODE, optional=True): t.String,
+            }
+        ).check(scope_prefix_map)
         if credentials is not None:
-            self._creds = EtcdCredential(credentials['user'], credentials['password'])
+            self._creds = EtcdCredential(credentials["user"], credentials["password"])
         else:
             self._creds = None
 
@@ -138,16 +143,16 @@ class AsyncEtcd:
         pass  # for backward compatibility
 
     def _mangle_key(self, k: str) -> str:
-        if k.startswith('/'):
+        if k.startswith("/"):
             k = k[1:]
-        return f'/sorna/{self.ns}/{k}'
+        return f"/sorna/{self.ns}/{k}"
 
     def _demangle_key(self, k: Union[bytes, str]) -> str:
         if isinstance(k, bytes):
             k = k.decode(self.encoding)
-        prefix = f'/sorna/{self.ns}/'
+        prefix = f"/sorna/{self.ns}/"
         if k.startswith(prefix):
-            k = k[len(prefix):]
+            k = k[len(prefix) :]
         return k
 
     def _merge_scope_prefix_map(
@@ -179,7 +184,7 @@ class AsyncEtcd:
         :return:
         """
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        mangled_key = self._mangle_key(f'{_slash(scope_prefix)}{key}')
+        mangled_key = self._mangle_key(f"{_slash(scope_prefix)}{key}")
         async with self.etcd.connect() as communicator:
             await communicator.put(mangled_key, str(val))
 
@@ -206,10 +211,10 @@ class AsyncEtcd:
 
         def _flatten(prefix: str, inner_dict: Mapping[str, str]) -> None:
             for k, v in inner_dict.items():
-                if k == '':
+                if k == "":
                     flattened_key = prefix
                 else:
-                    flattened_key = prefix + '/' + quote(k)
+                    flattened_key = prefix + "/" + quote(k)
                 if isinstance(v, dict):
                     _flatten(flattened_key, v)
                 else:
@@ -219,7 +224,7 @@ class AsyncEtcd:
 
         def _txn(action: EtcdTransactionAction):
             for k, v in flattened_dict.items():
-                action.put(self._mangle_key(f'{_slash(scope_prefix)}{k}'), str(v))
+                action.put(self._mangle_key(f"{_slash(scope_prefix)}{k}"), str(v))
 
         async with self.etcd.connect() as communicator:
             await communicator.txn(_txn)
@@ -245,7 +250,7 @@ class AsyncEtcd:
 
         def _pipe(txn: EtcdTransactionAction):
             for k, v in dict_obj.items():
-                txn.put(self._mangle_key(f'{_slash(scope_prefix)}{k}'), str(v))
+                txn.put(self._mangle_key(f"{_slash(scope_prefix)}{k}"), str(v))
 
         async with self.etcd.connect() as communicator:
             await communicator.txn(_pipe)
@@ -285,11 +290,11 @@ class AsyncEtcd:
         elif scope == ConfigScopes.GLOBAL:
             scope_prefixes = [_scope_prefix_map[ConfigScopes.GLOBAL]]
         else:
-            raise ValueError('Invalid scope prefix value')
+            raise ValueError("Invalid scope prefix value")
 
         async with self.etcd.connect() as communicator:
             for scope_prefix in scope_prefixes:
-                value = await communicator.get(self._mangle_key(f'{_slash(scope_prefix)}{key}'))
+                value = await communicator.get(self._mangle_key(f"{_slash(scope_prefix)}{key}"))
                 if value is not None:
                     return value
         return None
@@ -300,7 +305,7 @@ class AsyncEtcd:
         *,
         scope: ConfigScopes = ConfigScopes.MERGED,
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
-    ) -> Mapping[str, Optional[str]]:
+    ) -> GetPrefixValue:
         """
         Retrieves all key-value pairs under the given key prefix as a nested dictionary.
         All dictionary keys are automatically unquoted.
@@ -353,16 +358,16 @@ class AsyncEtcd:
         elif scope == ConfigScopes.GLOBAL:
             scope_prefixes = [_scope_prefix_map[ConfigScopes.GLOBAL]]
         else:
-            raise ValueError('Invalid scope prefix value')
+            raise ValueError("Invalid scope prefix value")
         pair_sets: List[List[Mapping | Tuple]] = []
         async with self.etcd.connect() as communicator:
             for scope_prefix in scope_prefixes:
-                mangled_key_prefix = self._mangle_key(f'{_slash(scope_prefix)}{key_prefix}')
+                mangled_key_prefix = self._mangle_key(f"{_slash(scope_prefix)}{key_prefix}")
                 values = await communicator.get_prefix(mangled_key_prefix)
                 pair_sets.append([(self._demangle_key(k), v) for k, v in values.items()])
 
         configs = [
-            make_dict_from_pairs(f'{_slash(scope_prefix)}{key_prefix}', pairs, '/')
+            make_dict_from_pairs(f"{_slash(scope_prefix)}{key_prefix}", pairs, "/")
             for scope_prefix, pairs in zip(scope_prefixes, pair_sets)
         ]
         return ChainMap(*configs)
@@ -380,14 +385,18 @@ class AsyncEtcd:
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
     ) -> bool:
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        mangled_key = self._mangle_key(f'{_slash(scope_prefix)}{key}')
+        mangled_key = self._mangle_key(f"{_slash(scope_prefix)}{key}")
 
         def _txn(success: EtcdTransactionAction, _):
             success.put(mangled_key, new_val)
+
         async with self.etcd.connect() as communicator:
-            _, success = await communicator.txn_compare([
-                CompareKey(mangled_key).value == initial_val,
-            ], _txn)
+            _, success = await communicator.txn_compare(
+                [
+                    CompareKey(mangled_key).value == initial_val,
+                ],
+                _txn,
+            )
             return success
 
     async def delete(
@@ -398,7 +407,7 @@ class AsyncEtcd:
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
     ):
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        mangled_key = self._mangle_key(f'{_slash(scope_prefix)}{key}')
+        mangled_key = self._mangle_key(f"{_slash(scope_prefix)}{key}")
         async with self.etcd.connect() as communicator:
             await communicator.delete(mangled_key)
 
@@ -411,9 +420,11 @@ class AsyncEtcd:
     ):
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
         async with self.etcd.connect() as communicator:
+
             def _txn(action: EtcdTransactionAction):
                 for k in keys:
-                    action.delete(self._mangle_key(f'{_slash(scope_prefix)}{k}'))
+                    action.delete(self._mangle_key(f"{_slash(scope_prefix)}{k}"))
+
             await communicator.txn(_txn)
 
     async def delete_prefix(
@@ -424,7 +435,7 @@ class AsyncEtcd:
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
     ):
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        mangled_key_prefix = self._mangle_key(f'{_slash(scope_prefix)}{key_prefix}')
+        mangled_key_prefix = self._mangle_key(f"{_slash(scope_prefix)}{key_prefix}")
         async with self.etcd.connect() as communicator:
             await communicator.delete_prefix(mangled_key_prefix)
 
@@ -453,7 +464,9 @@ class AsyncEtcd:
                 cleanup_event.set()
 
     async def watch(
-        self, key: str, *,
+        self,
+        key: str,
+        *,
         scope: ConfigScopes = ConfigScopes.GLOBAL,
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
         once: bool = False,
@@ -462,8 +475,8 @@ class AsyncEtcd:
         wait_timeout: float = None,
     ) -> AsyncGenerator[Union[QueueSentinel, Event], None]:
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        scope_prefix_len = len(self._mangle_key(f'{_slash(scope_prefix)}'))
-        mangled_key = self._mangle_key(f'{_slash(scope_prefix)}{key}')
+        scope_prefix_len = len(self._mangle_key(f"{_slash(scope_prefix)}"))
+        mangled_key = self._mangle_key(f"{_slash(scope_prefix)}{key}")
         ended_without_error = False
 
         while not ended_without_error:
@@ -482,14 +495,16 @@ class AsyncEtcd:
                 ended_without_error = True
             except grpc.aio.AioRpcError as e:
                 if e.code() == grpc.StatusCode.UNAVAILABLE:
-                    log.warn('watch(): error while connecting to Etcd server, retrying...')
+                    log.warn("watch(): error while connecting to Etcd server, retrying...")
                     await asyncio.sleep(self.watch_reconnect_intvl)
                     ended_without_error = False
                 else:
                     raise
 
     async def watch_prefix(
-        self, key_prefix: str, *,
+        self,
+        key_prefix: str,
+        *,
         scope: ConfigScopes = ConfigScopes.GLOBAL,
         scope_prefix_map: Mapping[ConfigScopes, str] = None,
         once: bool = False,
@@ -498,8 +513,8 @@ class AsyncEtcd:
         wait_timeout: float = None,
     ) -> AsyncGenerator[Union[QueueSentinel, Event], None]:
         scope_prefix = self._merge_scope_prefix_map(scope_prefix_map)[scope]
-        scope_prefix_len = len(self._mangle_key(f'{_slash(scope_prefix)}'))
-        mangled_key_prefix = self._mangle_key(f'{_slash(scope_prefix)}{key_prefix}')
+        scope_prefix_len = len(self._mangle_key(f"{_slash(scope_prefix)}"))
+        mangled_key_prefix = self._mangle_key(f"{_slash(scope_prefix)}{key_prefix}")
         ended_without_error = False
 
         while not ended_without_error:
@@ -518,7 +533,7 @@ class AsyncEtcd:
                 ended_without_error = True
             except grpc.aio.AioRpcError as e:
                 if e.code() == grpc.StatusCode.UNAVAILABLE:
-                    log.warn('watch_prefix(): error while connecting to Etcd server, retrying...')
+                    log.warn("watch_prefix(): error while connecting to Etcd server, retrying...")
                     await asyncio.sleep(self.watch_reconnect_intvl)
                     ended_without_error = False
                 else:

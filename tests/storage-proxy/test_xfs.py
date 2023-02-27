@@ -8,6 +8,9 @@ from ai.backend.common.types import BinarySize
 from ai.backend.storage.vfs import BaseVolume, run
 from ai.backend.storage.xfs import XfsVolume
 
+# module-level marker
+pytestmark = pytest.mark.integration
+
 
 def read_etc_projid():
     with open("/etc/projid") as fp:
@@ -95,10 +98,7 @@ async def test_xfs_single_vfolder_mgmt(xfs):
     await xfs.delete_vfolder(vfid)
     assert not vfpath.exists()
     assert not vfpath.parent.exists() or not (vfpath.parent / vfid.hex[2:4]).exists()
-    assert (
-        not vfpath.parent.parent.exists()
-        or not (vfpath.parent.parent / vfid.hex[0:2]).exists()
-    )
+    assert not vfpath.parent.parent.exists() or not (vfpath.parent.parent / vfid.hex[0:2]).exists()
     project_id_dict = read_etc_projid()
     vfpath_id_dict = read_etc_projects()
     assert str(vfid) not in project_id_dict

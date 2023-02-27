@@ -17,7 +17,7 @@ from typing import (
     Set,
 )
 
-import attr
+import attrs
 import sqlalchemy as sa
 import trafaret as t
 from sqlalchemy.engine.row import Row
@@ -40,11 +40,11 @@ from ai.backend.common.types import (
 )
 
 from ..defs import DEFAULT_ROLE
-from ..models import kernels, keypairs
+from ..models import AgentRow, KernelRow, SessionRow, kernels, keypairs
 from ..models.scaling_group import ScalingGroupOpts
 from ..registry import AgentRegistry
 
-log = BraceStyleAdapter(logging.getLogger('ai.backend.manager.scheduler'))
+log = BraceStyleAdapter(logging.getLogger("ai.backend.manager.scheduler"))
 
 
 def merge_resource(
@@ -58,14 +58,14 @@ def merge_resource(
             target[k] = update[k]
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class AgentAllocationContext:
     agent_id: Optional[AgentId]
     agent_addr: str
     scaling_group: str
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class AgentContext:
     agent_id: AgentId
     agent_addr: str
@@ -75,22 +75,23 @@ class AgentContext:
     occupied_slots: ResourceSlot
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class ScheduleDecision:
     agent_id: AgentId
     kernel_id: KernelId
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class SchedulingContext:
     """
     Context for each scheduling decision.
     """
+
     registry: AgentRegistry
     known_slot_types: Mapping[SlotName, SlotTypes]
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class ExistingSession:
     kernels: List[KernelInfo]
     access_key: AccessKey
@@ -136,15 +137,15 @@ class ExistingSession:
     def from_row(cls, row: Row) -> ExistingSession:
         return ExistingSession(
             kernels=[],
-            access_key=row['access_key'],
-            session_id=row['session_id'],
-            session_type=row['session_type'],
-            session_name=row['session_name'],
-            cluster_mode=row['cluster_mode'],
-            cluster_size=row['cluster_size'],
-            domain_name=row['domain_name'],
-            group_id=row['group_id'],
-            scaling_group=row['scaling_group'],
+            access_key=row["access_key"],
+            session_id=row["session_id"],
+            session_type=row["session_type"],
+            session_name=row["session_name"],
+            cluster_mode=row["cluster_mode"],
+            cluster_size=row["cluster_size"],
+            domain_name=row["domain_name"],
+            group_id=row["group_id"],
+            scaling_group=row["scaling_group"],
             occupying_slots=ResourceSlot(),
         )
 
@@ -152,10 +153,10 @@ class ExistingSession:
     def from_rows(cls, rows: Sequence[Row]) -> List[ExistingSession]:
         items: Dict[str, ExistingSession] = {}
         for row in rows:
-            if row['cluster_role'] == "main":
-                items[row['session_id']] = cls.from_row(row)
+            if row["cluster_role"] == "main":
+                items[row["session_id"]] = cls.from_row(row)
         for row in rows:
-            session_id = row['session_id']
+            session_id = row["session_id"]
             if session_id not in items:
                 # In some cases, sub containers are still RUNNING
                 # even though main container is TERMINATED.
@@ -164,17 +165,18 @@ class ExistingSession:
                 continue
             session = items[session_id]
             session.kernels.append(KernelInfo.from_row(row))
-            session.occupying_slots += row['occupied_slots']  # type: ignore
+            session.occupying_slots += row["occupied_slots"]  # type: ignore
         return list(items.values())
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class PendingSession:
     """
     Context for individual session-related information used during scheduling.
     Resource parameters defined here should contain total amount of resources
     for all kernels in one session.
     """
+
     kernels: List[KernelInfo]
     access_key: AccessKey
     agent_id: AgentId
@@ -200,13 +202,14 @@ class PendingSession:
     internal_data: Optional[MutableMapping[str, Any]]
     preopen_ports: List[int]
     created_at: datetime
+    use_host_network: bool
 
     @property
     def main_kernel_id(self) -> KernelId:
         for k in self.kernels:
             if k.cluster_role == DEFAULT_ROLE:
                 return k.kernel_id
-        raise RuntimeError('Unable to get the main kernel ID')
+        raise RuntimeError("Unable to get the main kernel ID")
 
     @classmethod
     def db_cols(cls) -> Set[ColumnElement]:
@@ -235,6 +238,7 @@ class PendingSession:
             kernels.c.startup_command,
             kernels.c.preopen_ports,
             kernels.c.created_at,
+            kernels.c.use_host_network,
         }
 
     @classmethod
@@ -243,10 +247,13 @@ class PendingSession:
             sa.select(
                 list(cls.db_cols() | KernelInfo.db_cols()),
             )
-            .select_from(sa.join(
-                kernels, keypairs,
-                keypairs.c.access_key == kernels.c.access_key,
-            ))
+            .select_from(
+                sa.join(
+                    kernels,
+                    keypairs,
+                    keypairs.c.access_key == kernels.c.access_key,
+                )
+            )
             .order_by(kernels.c.created_at)
         )
 
@@ -254,56 +261,55 @@ class PendingSession:
     def from_row(cls, row: Row) -> PendingSession:
         return cls(
             kernels=[],
-            access_key=row['access_key'],
-            agent_id=row['agent'],
-            agent_addr=row['agent_addr'],
-            session_creation_id=row['session_creation_id'],
-            session_id=row['session_id'],
-            session_type=row['session_type'],
-            session_name=row['session_name'],
-            cluster_mode=row['cluster_mode'],
-            cluster_size=row['cluster_size'],
-            domain_name=row['domain_name'],
-            group_id=row['group_id'],
-            status_data=row['status_data'],
-            scaling_group=row['scaling_group'],
-            resource_policy=row['resource_policy'],
+            access_key=row["access_key"],
+            agent_id=row["agent"],
+            agent_addr=row["agent_addr"],
+            session_creation_id=row["session_creation_id"],
+            session_id=row["session_id"],
+            session_type=row["session_type"],
+            session_name=row["session_name"],
+            cluster_mode=row["cluster_mode"],
+            cluster_size=row["cluster_size"],
+            domain_name=row["domain_name"],
+            group_id=row["group_id"],
+            status_data=row["status_data"],
+            scaling_group=row["scaling_group"],
+            resource_policy=row["resource_policy"],
             resource_opts={},
             requested_slots=ResourceSlot(),
-            internal_data=row['internal_data'],
+            internal_data=row["internal_data"],
             target_sgroup_names=[],
-            environ={
-                k: v for k, v
-                in map(lambda s: s.split('=', maxsplit=1), row['environ'])
-            },
-            vfolder_mounts=row['vfolder_mounts'],
-            bootstrap_script=row['bootstrap_script'],
-            startup_command=row['startup_command'],
-            preopen_ports=row['preopen_ports'],
-            created_at=row['created_at'],
+            environ={k: v for k, v in map(lambda s: s.split("=", maxsplit=1), row["environ"])},
+            vfolder_mounts=row["vfolder_mounts"],
+            bootstrap_script=row["bootstrap_script"],
+            startup_command=row["startup_command"],
+            preopen_ports=row["preopen_ports"],
+            created_at=row["created_at"],
+            use_host_network=row["use_host_network"],
         )
 
     @classmethod
     def from_rows(cls, rows: Sequence[Row]) -> List[PendingSession]:
         items: Dict[SessionId, PendingSession] = {}
         for row in rows:
-            if row['cluster_role'] == "main":
-                items[row['session_id']] = cls.from_row(row)
+            if row["cluster_role"] == "main":
+                items[row["session_id"]] = cls.from_row(row)
         for row in rows:
-            session = items[row['session_id']]
+            session = items[row["session_id"]]
             session.kernels.append(KernelInfo.from_row(row))
-            session.requested_slots += row['occupied_slots']  # type: ignore
-            merge_resource(session.resource_opts, row['resource_opts'])  # type: ignore
+            session.requested_slots += row["occupied_slots"]  # type: ignore
+            merge_resource(session.resource_opts, row["resource_opts"])  # type: ignore
         return list(items.values())
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class KernelInfo:
     """
     Representing invididual kernel info.
     Resource parameters defined here should contain single value of resource
     for each kernel.
     """
+
     kernel_id: KernelId
     session_id: SessionId
     access_key: AccessKey
@@ -311,6 +317,7 @@ class KernelInfo:
     agent_addr: str
     cluster_role: str
     cluster_idx: int
+    local_rank: int
     cluster_hostname: str
     image_ref: ImageRef
     resource_opts: Mapping[str, Any]
@@ -320,7 +327,7 @@ class KernelInfo:
     created_at: datetime
 
     def __str__(self):
-        return f'{self.kernel_id}#{self.cluster_role}{self.cluster_idx}'
+        return f"{self.kernel_id}#{self.cluster_role}{self.cluster_idx}"
 
     @classmethod
     def db_cols(cls) -> Set[ColumnElement]:
@@ -328,10 +335,11 @@ class KernelInfo:
             kernels.c.id,
             kernels.c.session_id,
             kernels.c.access_key,
-            kernels.c.agent,       # for scheduled kernels
+            kernels.c.agent,  # for scheduled kernels
             kernels.c.agent_addr,  # for scheduled kernels
             kernels.c.cluster_role,
             kernels.c.cluster_idx,
+            kernels.c.local_rank,
             kernels.c.cluster_hostname,
             kernels.c.image,
             kernels.c.architecture,
@@ -346,34 +354,35 @@ class KernelInfo:
     @classmethod
     def from_row(cls, row: Row) -> KernelInfo:
         return cls(
-            kernel_id=row['id'],
-            session_id=row['session_id'],
-            access_key=row['access_key'],
-            agent_id=row['agent'],
-            agent_addr=row['agent_addr'],
-            cluster_role=row['cluster_role'],
-            cluster_idx=row['cluster_idx'],
-            cluster_hostname=row['cluster_hostname'],
-            image_ref=ImageRef(row['image'], [row['registry']], row['architecture']),
-            resource_opts=row['resource_opts'],
-            requested_slots=row['occupied_slots'],
-            bootstrap_script=row['bootstrap_script'],
-            startup_command=row['startup_command'],
-            created_at=row['created_at'],
+            kernel_id=row["id"],
+            session_id=row["session_id"],
+            access_key=row["access_key"],
+            agent_id=row["agent"],
+            agent_addr=row["agent_addr"],
+            cluster_role=row["cluster_role"],
+            cluster_idx=row["cluster_idx"],
+            local_rank=row["local_rank"],
+            cluster_hostname=row["cluster_hostname"],
+            image_ref=ImageRef(row["image"], [row["registry"]], row["architecture"]),
+            resource_opts=row["resource_opts"],
+            requested_slots=row["occupied_slots"],
+            bootstrap_script=row["bootstrap_script"],
+            startup_command=row["startup_command"],
+            created_at=row["created_at"],
         )
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class KernelAgentBinding:
-    kernel: KernelInfo
+    kernel: KernelRow
     agent_alloc_ctx: AgentAllocationContext
+    allocated_host_ports: Set[int]
 
 
-@attr.s(auto_attribs=True, slots=True)
+@attrs.define(auto_attribs=True, slots=True)
 class PredicateResult:
     passed: bool
     message: Optional[str] = None
-    permanent: bool = False
 
 
 class SchedulingPredicate(Protocol):
@@ -394,7 +403,7 @@ class AbstractScheduler(metaclass=ABCMeta):
     """
 
     sgroup_opts: ScalingGroupOpts  # sgroup-specific config
-    config: Mapping[str, Any]   # scheduler-specific config
+    config: Mapping[str, Any]  # scheduler-specific config
     config_iv: t.Dict
 
     def __init__(self, sgroup_opts: ScalingGroupOpts, config: Mapping[str, Any]) -> None:
@@ -405,8 +414,8 @@ class AbstractScheduler(metaclass=ABCMeta):
     def pick_session(
         self,
         total_capacity: ResourceSlot,
-        pending_sessions: Sequence[PendingSession],
-        existing_sessions: Sequence[ExistingSession],
+        pending_sessions: Sequence[SessionRow],
+        existing_sessions: Sequence[SessionRow],
     ) -> Optional[SessionId]:
         """
         Pick a session to try schedule.
@@ -417,8 +426,8 @@ class AbstractScheduler(metaclass=ABCMeta):
     @abstractmethod
     def assign_agent_for_session(
         self,
-        possible_agents: Sequence[AgentContext],
-        pending_session: PendingSession,
+        possible_agents: Sequence[AgentRow],
+        pending_session: SessionRow,
     ) -> Optional[AgentId]:
         """
         Assign an agent for the entire session, only considering the total requested
@@ -433,7 +442,7 @@ class AbstractScheduler(metaclass=ABCMeta):
     @abstractmethod
     def assign_agent_for_kernel(
         self,
-        possible_agents: Sequence[AgentContext],
+        possible_agents: Sequence[AgentRow],
         pending_kernel: KernelInfo,
     ) -> Optional[AgentId]:
         """

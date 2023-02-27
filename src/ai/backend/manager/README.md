@@ -50,7 +50,6 @@ net.ipv4.tcp_wmem=4096 12582912 16777216
 
 #### Prerequisites
 
-* `libnsappy-dev` or `snappy-devel` system package depending on your distro
 * Python 3.6 or higher with [pyenv](https://github.com/pyenv/pyenv)
 and [pyenv-virtualenv](https://github.com/pyenv/pyenv-virtualenv) (optional but recommneded)
 * Docker 18.03 or later with docker-compose (18.09 or later is recommended)
@@ -117,7 +116,7 @@ Set up the public Docker registry:
 ```console
 $ backend.ai mgr etcd put config/docker/registry/index.docker.io "https://registry-1.docker.io"
 $ backend.ai mgr etcd put config/docker/registry/index.docker.io/username "lablup"
-$ backend.ai mgr etcd rescan-images index.docker.io
+$ backend.ai mgr image rescan index.docker.io
 ```
 
 Set up the vfolder paths:
