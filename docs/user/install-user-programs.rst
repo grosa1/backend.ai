@@ -24,7 +24,7 @@ With CLI:
 
 .. code-block:: console
 
-   $ backend.ai vfolder create .linuxbrew
+   $ backend.ai vfolder create .linuxbrew local:volume1
 
 Let’s check if they are created correctly.
 
@@ -45,7 +45,7 @@ In general, 1 CPU / 4GB RAM is enough.
 
 .. code-block:: console
 
-   $ sh -c "$(curl -fsSL https://raw.githubusercontent.com/Linuxbrew/install/master/install.sh)"
+   $ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
 
 
 Testing linuxbrew
